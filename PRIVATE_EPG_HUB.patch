@@ -1,0 +1,253 @@
+diff --git a/app/src/main/java/com/nuvio/tv/livetv/data/LiveTvRepository.kt b/app/src/main/java/com/nuvio/tv/livetv/data/LiveTvRepository.kt
+index 130e9e6..36be4d8 100644
+--- a/app/src/main/java/com/nuvio/tv/livetv/data/LiveTvRepository.kt
++++ b/app/src/main/java/com/nuvio/tv/livetv/data/LiveTvRepository.kt
+@@ -75,6 +75,14 @@ class LiveTvRepository @Inject constructor(
+         .build()
+ 
+     private val baseDir = File(context.filesDir, "livetv")
++    // Hub downloads use platform TLS validation and never follow a redirect to another host.
++    private val hubHttp = OkHttpClient.Builder()
++        .connectTimeout(20, TimeUnit.SECONDS)
++        .readTimeout(90, TimeUnit.SECONDS)
++        .callTimeout(10, TimeUnit.MINUTES)
++        .followRedirects(false)
++        .followSslRedirects(false)
++        .build()
+     private val playlistDir = File(baseDir, "playlists")
+     private val epgDir = File(baseDir, "epg")
+ 
+@@ -616,7 +624,8 @@ class LiveTvRepository @Inject constructor(
+                     )
+                 }
+                 if (result.getOrNull() == true) changed = true
+-                val err = result.exceptionOrNull()?.let { it.message ?: it.javaClass.simpleName }
++                // Network exceptions may include credential-bearing URLs. Keep EPG diagnostics generic.
++                val err = result.exceptionOrNull()?.let { "Guide download failed; check connection and source settings" }
+                 if (target.sourceId != null) {
+                     prefs.updateEpgSources { list ->
+                         list.map { if (it.id == target.sourceId) it.copy(lastUpdatedMs = if (err == null) now else it.lastUpdatedMs, lastError = err) else it }
+@@ -2275,7 +2284,8 @@ class LiveTvRepository @Inject constructor(
+                 if (lastModified.isNotBlank()) header("If-Modified-Since", lastModified)
+             }
+             .build()
+-        http.newCall(request).execute().use { response ->
++        val isHubDownload = PrivateEpgHub.presets.any { it.url == url }
++        (if (isHubDownload) hubHttp else http).newCall(request).execute().use { response ->
+             if (response.code == 304 && target.exists()) {
+                 target.setLastModified(System.currentTimeMillis()) // checked again after the usual interval
+                 reportAs?.let { LIVE_REPORT.add("Guide \"$it\": server said not changed since last time; kept the copy we have") }
+@@ -2304,6 +2314,7 @@ class LiveTvRepository @Inject constructor(
+                         if (n < 0) break
+                         out.write(buf, 0, n)
+                         read += n
++                        if (isHubDownload && read > 32L * 1024 * 1024) error("Guide exceeds download limit")
+                         if (progressLabel != null) {
+                             val now = System.currentTimeMillis()
+                             if (now - shownAt > 750) {
+diff --git a/app/src/main/java/com/nuvio/tv/livetv/ui/LiveTvSettingsViewModel.kt b/app/src/main/java/com/nuvio/tv/livetv/ui/LiveTvSettingsViewModel.kt
+index 01175cb..591bf49 100644
+--- a/app/src/main/java/com/nuvio/tv/livetv/ui/LiveTvSettingsViewModel.kt
++++ b/app/src/main/java/com/nuvio/tv/livetv/ui/LiveTvSettingsViewModel.kt
+@@ -100,6 +100,34 @@ class LiveTvSettingsViewModel @Inject constructor(
+     fun movePlaylist(id: String, delta: Int) = viewModelScope.launch { repository.movePlaylist(id, delta) }
+ 
+     fun addEpg(name: String, url: String) = viewModelScope.launch { repository.addEpg(name, url) }
++    private val hubAddMutex = kotlinx.coroutines.sync.Mutex()
++    private val epgClock = kotlinx.coroutines.flow.flow {
++        while (true) {
++            emit(System.currentTimeMillis())
++            kotlinx.coroutines.delay(60_000)
++        }
++    }
++    val epgQuality = kotlinx.coroutines.flow.combine(repository.channels, repository.programs, epgClock) { channels, programmes, now ->
++        com.nuvio.tv.livetv.data.PrivateEpgHub.quality(
++            channels.map { it.key }.toSet(),
++            programmes.mapValues { (_, entries) -> entries.map { it.startMs to it.stopMs } },
++            now
++        )
++    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), com.nuvio.tv.livetv.data.PrivateEpgHub.Quality())
++
++    fun addHubRegion(region: String) = viewModelScope.launch {
++        hubAddMutex.lock()
++        try {
++            val preset = com.nuvio.tv.livetv.data.PrivateEpgHub.presets.firstOrNull { it.region == region } ?: return@launch
++            val existing = prefs.currentEpgSources().firstOrNull { it.url.trim() == preset.url }
++            if (existing == null) repository.addEpg(preset.name, preset.url)
++            else if (!existing.enabled) repository.setEpgEnabled(existing.id, true)
++        } finally {
++            hubAddMutex.unlock()
++        }
++    }
++
++    fun refreshHubEpg() = repository.refreshEpgOnly()
+     fun saveEpg(source: EpgSource) = viewModelScope.launch { repository.updateEpg(source) }
+     fun removeEpg(id: String) = viewModelScope.launch { repository.removeEpg(id) }
+     fun setEpgEnabled(id: String, enabled: Boolean) = viewModelScope.launch { repository.setEpgEnabled(id, enabled) }
+diff --git a/app/src/main/java/com/nuvio/tv/ui/screens/settings/LiveTvSettingsContent.kt b/app/src/main/java/com/nuvio/tv/ui/screens/settings/LiveTvSettingsContent.kt
+index 9031fe8..faf342c 100644
+--- a/app/src/main/java/com/nuvio/tv/ui/screens/settings/LiveTvSettingsContent.kt
++++ b/app/src/main/java/com/nuvio/tv/ui/screens/settings/LiveTvSettingsContent.kt
+@@ -179,6 +179,7 @@ private sealed interface LiveDialog {
+     data object AddM3u : LiveDialog
+     data object AddXtream : LiveDialog
+     data object AddEpg : LiveDialog
++    data object PrivateEpgHub : LiveDialog
+     data class PlaylistActions(val source: PlaylistSource) : LiveDialog
+     data class EditPlaylist(val source: PlaylistSource) : LiveDialog
+     data class EpgActions(val source: EpgSource) : LiveDialog
+@@ -279,6 +280,7 @@ internal fun LiveTvSettingsContent(
+     fun firstFocus(p: LiveTvPage): FocusRequester? = firstRequester.takeIf { page == p }
+     val playlists by viewModel.playlists.collectAsStateWithLifecycle()
+     val epgs by viewModel.epgSources.collectAsStateWithLifecycle()
++    val epgQuality by viewModel.epgQuality.collectAsStateWithLifecycle()
+     val s by viewModel.settings.collectAsStateWithLifecycle()
+     val user by viewModel.userState.collectAsStateWithLifecycle()
+     val status by viewModel.status.collectAsStateWithLifecycle()
+@@ -457,6 +459,12 @@ internal fun LiveTvSettingsContent(
+                         onClick = { dialog = LiveDialog.AddXtream }
+                     )
+                     SubHeading("TV Guides (EPG)")
++                    SettingsActionRow(
++                        title = "Private EPG Hub",
++                        subtitle = epgQuality.description,
++                        leadingIcon = Icons.Default.Schedule,
++                        onClick = { dialog = LiveDialog.PrivateEpgHub }
++                    )
+                     epgs.forEach { e ->
+                         SettingsActionRow(
+                             title = e.name,
+@@ -1642,6 +1650,31 @@ internal fun LiveTvSettingsContent(
+                 close()
+             }
+         )
++        LiveDialog.PrivateEpgHub -> ActionListDialog(
++            title = "Private EPG Hub · kies een land",
++            actions = com.nuvio.tv.livetv.data.PrivateEpgHub.presets.map { preset ->
++                val source = epgs.firstOrNull { it.url.trim() == preset.url }
++                val label = when {
++                    source == null -> "${preset.label} toevoegen"
++                    !source.enabled -> "${preset.label} inschakelen"
++                    source.lastError != null -> "${preset.label} · ophalen mislukt"
++                    source.lastUpdatedMs == 0L -> "${preset.label} · wacht op download"
++                    else -> "${preset.label} · actief"
++                }
++                label to { viewModel.addHubRegion(preset.region); Unit }
++            } + listOf(
++                "Gids nu verversen" to { viewModel.refreshHubEpg(); close() },
++                "Eigen bron / XXX toevoegen" to { dialog = LiveDialog.AddEpg },
++                "Privacy en werking" to {
++                    dialog = LiveDialog.Confirm(
++                        "Private EPG Hub",
++                        "Gidsen worden rechtstreeks van EPGShare01 opgehaald. Die dienst ziet je IP-adres, maar krijgt geen zenderlijst of IPTV-login van deze functie. Er wordt niets toegevoegd totdat je een land kiest. Koppelen, opslag en verversen gebeuren in Nuvio. Beschikbaarheid en dekking kunnen wisselen. XXX voeg je zelf toe via een eigen XMLTV-bron. Corrigeer een verkeerde koppeling via Change EPG in de tv-gids.",
++                        "Begrepen"
++                    ) { dialog = LiveDialog.PrivateEpgHub }
++                }
++            ),
++            onDismiss = close
++        )
+         LiveDialog.AddEpg -> SourceFormDialog(
+             title = "Add EPG source",
+             fields = listOf(FormField("Name", "Guide"), FormField("XMLTV URL", "http://…/epg.xml.gz")),
+diff --git a/app/src/main/java/com/nuvio/tv/livetv/data/PrivateEpgHub.kt b/app/src/main/java/com/nuvio/tv/livetv/data/PrivateEpgHub.kt
+new file mode 100644
+--- /dev/null
++++ b/app/src/main/java/com/nuvio/tv/livetv/data/PrivateEpgHub.kt
+@@ -0,0 +1,33 @@
++package com.nuvio.tv.livetv.data
++
++/** Public guide downloads only: never send playlist metadata to the guide host. */
++object PrivateEpgHub {
++    data class Preset(val region: String, val label: String, val file: String) {
++        val url get() = "https://epgshare01.online/epgshare01/epg_ripper_$file.xml.gz"
++        val name get() = "EPG Hub · $label"
++    }
++
++    // Checked against the publisher's directory; availability and coverage can change.
++    val presets = listOf(
++        Preset("NL", "Nederland", "NL1"), Preset("BE", "België", "BE2"),
++        Preset("DE", "Duitsland", "DE1"), Preset("PL", "Polen", "PL1"),
++        Preset("US", "Verenigde Staten", "US2"), Preset("UK", "Verenigd Koninkrijk", "UK1")
++    )
++
++    data class Quality(val total: Int = 0, val current: Int = 0, val upcomingOnly: Int = 0) {
++        val missing get() = (total - current - upcomingOnly).coerceAtLeast(0)
++        val description get() = "$current nu · $upcomingOnly alleen later · $missing zonder komende gids"
++    }
++
++    /** Count intervals without retaining names, URLs, programme titles or credentials. */
++    fun quality(channels: Set<String>, schedules: Map<String, List<Pair<Long, Long>>>, now: Long): Quality {
++        var current = 0
++        var upcoming = 0
++        channels.forEach { key ->
++            val entries = schedules[key].orEmpty().filter { it.second > it.first }
++            if (entries.any { it.first <= now && it.second > now }) current++
++            else if (entries.any { it.first > now }) upcoming++
++        }
++        return Quality(channels.size, current, upcoming)
++    }
++}
+diff --git a/app/src/test/java/com/nuvio/tv/livetv/data/PrivateEpgHubTest.kt b/app/src/test/java/com/nuvio/tv/livetv/data/PrivateEpgHubTest.kt
+new file mode 100644
+--- /dev/null
++++ b/app/src/test/java/com/nuvio/tv/livetv/data/PrivateEpgHubTest.kt
+@@ -0,0 +1,36 @@
++package com.nuvio.tv.livetv.data
++
++import org.junit.Assert.*
++import org.junit.Test
++
++class PrivateEpgHubTest {
++    @Test fun qualitySeparatesCurrentUpcomingExpiredAndMissing() {
++        val report = PrivateEpgHub.quality(setOf("a", "b", "c", "d"), mapOf(
++            "a" to listOf(80L to 110L, 120L to 130L),
++            "b" to listOf(120L to 130L),
++            "c" to listOf(50L to 100L),
++            "not-in-playlist" to listOf(80L to 110L)
++        ), 100L)
++        assertEquals(4, report.total)
++        assertEquals(1, report.current)
++        assertEquals(1, report.upcomingOnly)
++        assertEquals(2, report.missing)
++    }
++
++    @Test fun invalidIntervalsDoNotCountAsCoverage() {
++        assertEquals(1, PrivateEpgHub.quality(setOf("a"),
++            mapOf("a" to listOf(120L to 110L)), 100L).missing)
++    }
++
++    @Test fun presetsAreExplicitPublicHttpsFeedsWithoutCredentials() {
++        assertEquals(setOf("NL", "BE", "DE", "PL", "US", "UK"), PrivateEpgHub.presets.map { it.region }.toSet())
++        PrivateEpgHub.presets.forEach {
++            val uri = java.net.URI(it.url)
++            assertEquals("https", uri.scheme)
++            assertEquals("epgshare01.online", uri.host)
++            assertNull(uri.userInfo)
++            assertNull(uri.query)
++            assertTrue(uri.path.endsWith(".xml.gz"))
++        }
++    }
++}
+diff --git a/docs/PRIVATE_EPG_HUB.md b/docs/PRIVATE_EPG_HUB.md
+new file mode 100644
+--- /dev/null
++++ b/docs/PRIVATE_EPG_HUB.md
+@@ -0,0 +1,18 @@
++# Private EPG Hub (native Nuvio extension)
++
++Open Settings → Live TV → Setup → Playlists / TV Guides (EPG) → Private EPG Hub.
++Choose a country to add its public EPGShare01 feed. No feed is enabled by default. Clicking an existing country does not create duplicates; a disabled source is enabled again. Source rows below the hub provide edit, disable, update and removal. Use the existing update interval setting for automatic guide refresh while Nuvio runs, and startup refresh after reopening. This does not install a background Android worker.
++
++The hub shows how many imported channels have a programme now, only upcoming programmes, or no upcoming guide. These counts cover the repository's imported channels, including hidden channels, and all sources (also provider guides). They are not just the public hub feeds. An expired or malformed interval does not count as coverage. Counts refresh on data changes and every minute while the settings screen is observed.
++
++Existing XMLTV parsing, cached database, automatic matching and manual Change EPG assignment remain in use. This first native version adds source selection and aggregate diagnostics; it does not replace the existing matching engine or provide a new country-scoped matcher. Review regional and timeshift matches in the guide. Adult/XXX sources remain manual via Add EPG Source; the hub does not bypass existing parental controls or promise adult coverage.
++
++Public download presets: NL1, BE2, DE1, PL1, US2, UK1, verified in the publisher directory on 2026-11-03. https://epgshare01.online/epgshare01/ . All six returned HTTP 200 and gzip magic bytes in a GET probe using Nuvio's existing User-Agent. HEAD requests without that User-Agent returned 403; reachability checks should use the actual download method. Full feed contents and TV-device compatibility were not validated by that header probe. Availability and coverage are external and may change; directory presence does not certify programme accuracy or redistribution rights. Do not rehost these guides by default.
++
++Privacy: this feature makes ordinary guide downloads only. It does not upload channel inventories, stream URLs or Xtream credentials. The public guide server sees the device's IP address. Country presets use a separate OkHttp client with platform certificate checks, redirects disabled and a 32 MiB compressed download limit. EPG network errors stored/reported by this path are generic, because exception text can contain URLs. Existing provider handling is otherwise preserved. Source settings continue to use the app's existing persistence/sync behavior; this extension does not add any external account or change existing sync preferences.
++
++No TrueNAS, Nextcloud, GitHub account, NAS endpoint or separately installed addon manifest is required. This is compiled into the customized Nuvio APK. The standalone epg-hub prototype in the parent workspace is independent.
++
++Validation: `:app:testFullDebugUnitTest --tests com.nuvio.tv.livetv.data.PrivateEpgHubTest --tests com.nuvio.tv.privatehub.PrivateHubTest` and `:app:assembleFullDebug`. Device UI/navigation and actual guide downloads still need a TV smoke test. Use the local project's existing private signing configuration; never publish private signing keys, provider sources, logs or local.properties.
++
++Current validation result (2026-11-03): the standalone Kotlin quality/preset checks compiled and passed. The integration patch passed `git apply --reverse --check` against this working tree. The full Android build progressed through analysis into JVM class generation, but was stopped because the shared workstation had very little free memory and became extremely slow. No new APK or passing Android unit-test result is claimed. Resume the full build when enough memory is available; the existing app's unchanged code also needs compilation. Do not install an older APK assuming it contains this extension.
