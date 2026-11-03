@@ -1,0 +1,38 @@
+name: Update public EPG addon
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: [addon.py, test_addon.py, .github/workflows/update-guide.yml]
+  schedule:
+    - cron: '17 */6 * * *'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: epg-publication
+  cancel-in-progress: false
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Test protocol, privacy and XML handling
+        run: python3 -m unittest -v test_addon
+      - name: Generate public guide data
+        run: python3 addon.py --output public
+      - name: Publish generated snapshot only
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected="$(git ls-remote --heads origin refs/heads/epg-data | cut -f1)"
+          git checkout --orphan epg-data
+          git rm -rf --ignore-unmatch .
+          git add --force public
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'Refresh public EPG snapshot'
+          git push origin HEAD:refs/heads/epg-data --force-with-lease="refs/heads/epg-data:$expected"

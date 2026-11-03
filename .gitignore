@@ -7,3 +7,6 @@ data/
 *.jks
 local.properties
 *.log
+__pycache__/
+public/
+.validation-public/
