@@ -1,0 +1,9 @@
+.env
+private/
+data/
+*.m3u
+*.m3u8
+*.keystore
+*.jks
+local.properties
+*.log
