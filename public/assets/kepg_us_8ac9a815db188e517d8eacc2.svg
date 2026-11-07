@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="400" height="400" viewBox="0 0 400 400">
+<rect width="400" height="400" rx="28" fill="#101b2b"/><rect x="28" y="28" width="70" height="38" rx="10" fill="#2dd4bf"/>
+<text x="63" y="54" font-family="sans-serif" font-size="23" font-weight="bold" text-anchor="middle" fill="#101b2b">US</text>
+<path d="M48 112H352M48 144H280M48 176H320" stroke="#33485e" stroke-width="12" stroke-linecap="round"/>
+<text x="28" y="253" font-family="sans-serif" font-size="23" font-weight="bold" fill="#f0f5ff">Newsmax TV HD</text>
+<text x="28" y="346" font-family="sans-serif" font-size="18" fill="#9fbdcf">TV-GIDS · EPG</text></svg>
