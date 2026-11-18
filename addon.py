@@ -131,7 +131,7 @@ def text(element, name, limit=200):
 # Reject potentially sensitive source strings, while retaining ordinary programme summaries.
 SENSITIVE_DETAIL = re.compile(
     r'(?i)(?:https?://|rtsp://|rtmp://|private provider|'
-    r'\\b(?:password|passwd|username|api[_-]?key|token|xtream)\\s*[:=])'
+    r'\b(?:password|passwd|username|api[_-]?key|token|xtream)\s*[:=])'
 )
 
 
