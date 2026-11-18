@@ -146,10 +146,10 @@ class AddonTests(unittest.TestCase):
         titles = [p.findtext('title') for p in doc.findall('programme')]
         self.assertIn('Day ten', titles)
         self.assertNotIn('Too far', titles)
-        self.assertEqual(doc.findall('programme')[1].findtext('desc'),
+        self.assertEqual(doc.findall('programme')[0].findtext('desc'),
                          'A factual show summary from the source.')
-        self.assertEqual(doc.findall('programme')[1].findtext('category'), 'Documentary')
-        self.assertEqual(doc.findall('programme')[1].findtext('episode-num'), 'S1 E2')
+        self.assertEqual(doc.findall('programme')[0].findtext('category'), 'Documentary')
+        self.assertEqual(doc.findall('programme')[0].findtext('episode-num'), 'S1 E2')
         self.assertEqual(report['window_days'], 14)
         self.assertEqual(report['regions']['NL']['channels_with_descriptions'], 1)
 
