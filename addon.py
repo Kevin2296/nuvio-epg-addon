@@ -190,11 +190,12 @@ def parse(raw: bytes, now: datetime):
             continue
         accepted = []
         last_stop = None
-        for start, stop, title in sorted(set(items)):
+        for programme in sorted(set(items)):
+            start, stop = programme[:2]
             if last_stop is not None and start < last_stop:
                 overlaps += 1
                 continue
-            accepted.append((start, stop, title))
+            accepted.append(programme)
             last_stop = stop
         if accepted:
             result[cid] = {'name': names[cid], 'programmes': accepted}
