@@ -1,0 +1,35 @@
+name: Smoke test live international XMLTV sources
+
+on:
+  push:
+    branches: [feature/international-epg-14day-details]
+    paths: [.github/workflows/smoke-region-feeds.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out EPG changes
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Generate four real regional guides without publishing
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import addon
+          addon.REGIONS = {key: val for key, val in addon.REGIONS.items()
+                           if key in ('NL', 'PL', 'FR', 'US')}
+          report = addon.generate(Path('smoke-output'))
+          print('Regions with live data:', sorted(report['regions']))
+          print('Main guide channels:', report['combined_channels'])
+          print('Description coverage:', {k: v['channels_with_descriptions']
+                                         for k, v in report['regions'].items()})
+          assert report['combined_channels'] > 0
+          assert len(report['regions']) >= 2
+          assert (Path('smoke-output') / 'epg/all.xml.gz').exists()
+          assert report['window_days'] == 14
+          PY
