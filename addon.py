@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 import gzip
 import hashlib
@@ -21,6 +22,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 UTC = timezone.utc
 PAGE_SIZE = 100
+WINDOW_DAYS = 14
+CATALOG_REGIONS = frozenset({'NL', 'BE', 'DE', 'PL', 'US', 'UK'})
 MAX_COMPRESSED = 32 * 1024 * 1024
 MAX_XML = 160 * 1024 * 1024
 BASE = 'https://raw.githubusercontent.com/Kevin2296/nuvio-epg-addon/epg-data/public'
@@ -32,6 +35,53 @@ REGIONS = {
     'PL': ('Polen', 'PL1', 'Europe/Warsaw'),
     'US': ('Verenigde Staten', 'US2', 'America/New_York'),
     'UK': ('Verenigd Koninkrijk', 'UK1', 'Europe/London'),
+    'FR': ('Frankrijk', 'FR1', 'Europe/Paris'),
+    'ES': ('Spanje', 'ES1', 'Europe/Madrid'),
+    'IT': ('Italië', 'IT1', 'Europe/Rome'),
+    'PT': ('Portugal', 'PT1', 'Europe/Lisbon'),
+    'AT': ('Oostenrijk', 'AT1', 'Europe/Vienna'),
+    'CH': ('Zwitserland', 'CH1', 'Europe/Zurich'),
+    'LU': ('Luxemburg', 'LU1', 'Europe/Luxembourg'),
+    'IE': ('Ierland', 'IE1', 'Europe/Dublin'),
+    'CZ': ('Tsjechië', 'CZ1', 'Europe/Prague'),
+    'SK': ('Slowakije', 'SK1', 'Europe/Bratislava'),
+    'HU': ('Hongarije', 'HU1', 'Europe/Budapest'),
+    'RO': ('Roemenië', 'RO1', 'Europe/Bucharest'),
+    'HR': ('Kroatië', 'HR1', 'Europe/Zagreb'),
+    'RS': ('Servië', 'RS1', 'Europe/Belgrade'),
+    'BA': ('Bosnië en Herzegovina', 'BA1', 'Europe/Sarajevo'),
+    'BG': ('Bulgarije', 'BG1', 'Europe/Sofia'),
+    'GR': ('Griekenland', 'GR1', 'Europe/Athens'),
+    'TR': ('Turkije', 'TR3', 'Europe/Istanbul'),
+    'DK': ('Denemarken', 'DK1', 'Europe/Copenhagen'),
+    'SE': ('Zweden', 'SE1', 'Europe/Stockholm'),
+    'NO': ('Noorwegen', 'NO1', 'Europe/Oslo'),
+    'FI': ('Finland', 'FI1', 'Europe/Helsinki'),
+    'CA': ('Canada', 'CA2', 'America/Toronto'),
+    'AU': ('Australië', 'AU1', 'Australia/Sydney'),
+    'NZ': ('Nieuw-Zeeland', 'NZ1', 'Pacific/Auckland'),
+    'BR': ('Brazilië', 'BR1', 'America/Sao_Paulo'),
+    'MX': ('Mexico', 'MX1', 'America/Mexico_City'),
+    'AR': ('Argentinië', 'AR1', 'America/Argentina/Buenos_Aires'),
+    'CL': ('Chili', 'CL1', 'America/Santiago'),
+    'CO': ('Colombia', 'CO1', 'America/Bogota'),
+    'EC': ('Ecuador', 'EC1', 'America/Guayaquil'),
+    'PE': ('Peru', 'PE1', 'America/Lima'),
+    'UY': ('Uruguay', 'UY1', 'America/Montevideo'),
+    'JP': ('Japan', 'JP1', 'Asia/Tokyo'),
+    'KR': ('Zuid-Korea', 'KR1', 'Asia/Seoul'),
+    'HK': ('Hongkong', 'HK1', 'Asia/Hong_Kong'),
+    'SG': ('Singapore', 'SG1', 'Asia/Singapore'),
+    'MY': ('Maleisië', 'MY1', 'Asia/Kuala_Lumpur'),
+    'ID': ('Indonesië', 'ID1', 'Asia/Jakarta'),
+    'IN': ('India', 'IN1', 'Asia/Kolkata'),
+    'IL': ('Israël', 'IL1', 'Asia/Jerusalem'),
+    'AE': ('Verenigde Arabische Emiraten', 'AE1', 'Asia/Dubai'),
+    'ZA': ('Zuid-Afrika', 'ZA1', 'Africa/Johannesburg'),
+    'UA': ('Oekraïne', 'UA1', 'Europe/Kyiv'),
+    'LV': ('Letland', 'LV1', 'Europe/Riga'),
+    'LT': ('Litouwen', 'LT1', 'Europe/Vilnius'),
+    'CY': ('Cyprus', 'CY1', 'Asia/Nicosia'),
 }
 
 
@@ -82,7 +132,7 @@ def text(element, name, limit=200):
 def parse(raw: bytes, now: datetime):
     """Return whitelisted channel names and valid schedules; never pass URLs through."""
     names, programmes = {}, defaultdict(list)
-    end = now + timedelta(hours=72)
+    end = now + timedelta(days=WINDOW_DAYS)
     invalid = 0
     raw = xml_bytes(raw)
     root_tag = None
@@ -207,7 +257,8 @@ def build(output: Path, feeds: dict, now: datetime, base=BASE, source_status=Non
     catalogs = []
     combined = {}
     duplicate_ids = 0
-    report = {'generated_at': iso(now), 'window_hours': 72, 'regions': {},
+    report = {'generated_at': iso(now), 'window_hours': WINDOW_DAYS * 24,
+              'window_days': WINDOW_DAYS, 'regions': {},
               'guide_only': True, 'source_status': source_status or {}}
     for region in REGIONS:
         if region not in feeds:
@@ -252,8 +303,8 @@ def build(output: Path, feeds: dict, now: datetime, base=BASE, source_status=Non
             if skip == 0:
                 write_json(output, f'catalog/tv/{slug}.json', payload)
             write_json(output, f'catalog/tv/{slug}/skip={skip}.json', payload)
-            # Covers midnight crossings and the entire 72-hour window.
-            for offset in range(-1, 5):
+            # Covers midnight crossings and the entire publication window.
+            for offset in range(-1, WINDOW_DAYS + 2):
                 day = (now + timedelta(days=offset)).date()
                 start = datetime.combine(day, datetime.min.time(), tzinfo=UTC)
                 stop = start + timedelta(days=1)
@@ -272,7 +323,7 @@ def build(output: Path, feeds: dict, now: datetime, base=BASE, source_status=Non
     report['combined_channels'] = len(combined)
     report['duplicate_xmltv_ids_first_source_wins'] = duplicate_ids
     manifest = {
-        'id': 'com.kevin2296.nuvio.epg', 'version': '1.0.0', 'name': 'Nuvio EPG · TV-gids',
+        'id': 'com.kevin2296.nuvio.epg', 'version': '1.1.0', 'name': 'Nuvio EPG · TV-gids',
         'description': 'Internationale tv-gids. Alleen gidsinformatie; geen IPTV-login of videostreams. '
                        'Gebruik de XMLTV-links uit de README voor de ingebouwde Live TV-gids.',
         'resources': ['catalog', 'meta', 'stream'], 'types': ['tv'], 'idPrefixes': ['kepg_'],
