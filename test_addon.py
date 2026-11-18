@@ -127,5 +127,59 @@ class AddonTests(unittest.TestCase):
         self.assertFalse((self.output / 'manifest.json').exists())
 
 
+    def test_fourteen_day_window_preserves_real_metadata_without_inventing_shows(self):
+        root = ET.fromstring(feed())
+        current = root.findall('programme')[1]
+        ET.SubElement(current, 'desc').text = 'A factual show summary from the source.'
+        ET.SubElement(current, 'category').text = 'Documentary'
+        ET.SubElement(current, 'sub-title').text = 'Episode subtitle'
+        ET.SubElement(current, 'episode-num', system='onscreen').text = 'S1 E2'
+        later = NOW + timedelta(days=10)
+        for when, title in ((later, 'Day ten'), (NOW + timedelta(days=15), 'Too far')):
+            p = ET.SubElement(root, 'programme', channel='station/0.nl',
+                              start=when.strftime('%Y%m%d%H%M%S +0000'),
+                              stop=(when + timedelta(hours=1)).strftime('%Y%m%d%H%M%S +0000'))
+            ET.SubElement(p, 'title').text = title
+        report = addon.build(self.output, {'NL': ET.tostring(root)}, NOW)
+        xml = gzip.decompress((self.output / 'epg/nl.xml.gz').read_bytes())
+        doc = ET.fromstring(xml)
+        titles = [p.findtext('title') for p in doc.findall('programme')]
+        self.assertIn('Day ten', titles)
+        self.assertNotIn('Too far', titles)
+        self.assertEqual(doc.findall('programme')[1].findtext('desc'),
+                         'A factual show summary from the source.')
+        self.assertEqual(doc.findall('programme')[1].findtext('category'), 'Documentary')
+        self.assertEqual(doc.findall('programme')[1].findtext('episode-num'), 'S1 E2')
+        self.assertEqual(report['window_days'], 14)
+        self.assertEqual(report['regions']['NL']['channels_with_descriptions'], 1)
+
+    def test_international_country_is_xmltv_only_not_massive_addon_catalog(self):
+        report = addon.build(self.output, {'NL': feed(), 'ES': feed()}, NOW)
+        self.assertTrue((self.output / 'epg/es.xml.gz').exists())
+        self.assertFalse((self.output / 'catalog/tv/es.json').exists())
+        manifest = self.read('manifest.json')
+        self.assertNotIn('es', [x['id'] for x in manifest['catalogs']])
+        self.assertIn('ES', report['extended_xmltv_only'])
+        self.assertEqual(report['combined_channels'], 1)
+
+    def test_sbs_abbreviation_only_when_unambiguous_in_dutch_feed(self):
+        root = ET.fromstring(feed())
+        root.find('channel').find('display-name').text = 'SBS 6'
+        addon.build(self.output, {'NL': ET.tostring(root)}, NOW)
+        xml = ET.fromstring(gzip.decompress((self.output / 'epg/nl.xml.gz').read_bytes()))
+        self.assertEqual([x.text for x in xml.find('channel').findall('display-name')],
+                         ['SBS 6', 'SBS'])
+
+    def test_sensitive_description_is_dropped(self):
+        root = ET.fromstring(feed())
+        for p in root.findall('programme'):
+            ET.SubElement(p, 'desc').text = 'https://private.invalid/?token=secret'
+        addon.build(self.output, {'NL': ET.tostring(root)}, NOW)
+        xml = gzip.decompress((self.output / 'epg/nl.xml.gz').read_bytes())
+        self.assertNotIn(b'private.invalid', xml)
+        self.assertNotIn(b'token=secret', xml)
+
+
+
 if __name__ == '__main__':
     unittest.main()
