@@ -260,11 +260,21 @@ def description(region, programmes, now):
     return '\n'.join(lines)
 
 
-def xmltv(channels):
+def xmltv(channels, region=None):
     root = ET.Element('tv', {'generator-info-name': 'Nuvio EPG Addon'})
+    # "SBS" can be an ambiguous abbreviation worldwide, but in the Dutch
+    # feed it can safely alias SBS 6 only when no competing SBS channels exist.
+    sbs = [(cid, item) for cid, item in channels.items()
+           if (item.get('region', region) == 'NL' and
+               ''.join(c for c in item['name'].casefold() if c.isalnum()).startswith('sbs'))]
+    sbs6 = [cid for cid, item in sbs
+            if ''.join(c for c in item['name'].casefold() if c.isalnum()) == 'sbs6']
+    safe_sbs = set(sbs6) if len(sbs) == len(sbs6) == 1 else set()
     for cid, item in channels.items():
         ch = ET.SubElement(root, 'channel', {'id': cid})
         ET.SubElement(ch, 'display-name').text = item['name']
+        if cid in safe_sbs:
+            ET.SubElement(ch, 'display-name').text = 'SBS'
     for cid, item in channels.items():
         for program in item['programmes']:
             start, stop, title = program[:3]
@@ -304,14 +314,15 @@ def build(output: Path, feeds: dict, now: datetime, base=BASE, source_status=Non
             continue
         channels, counts = parse(feeds[region], now)
         for source_id, item in channels.items():
-            if source_id not in combined:
-                combined[source_id] = item
-            else:
-                duplicate_ids += 1
+            if region in CATALOG_REGIONS:
+                if source_id not in combined:
+                    combined[source_id] = {**item, 'region': region}
+                else:
+                    duplicate_ids += 1
         report['regions'][region] = counts
         slug = region.lower()
         (output / 'epg').mkdir(exist_ok=True)
-        (output / 'epg' / f'{slug}.xml.gz').write_bytes(xmltv(channels))
+        (output / 'epg' / f'{slug}.xml.gz').write_bytes(xmltv(channels, region))
         # Extended international XMLTV coverage without enormous addon catalogues.
         if region not in CATALOG_REGIONS:
             continue
@@ -363,6 +374,9 @@ def build(output: Path, feeds: dict, now: datetime, base=BASE, source_status=Non
         raise ValueError('no healthy regions')
     (output / 'epg' / 'all.xml.gz').write_bytes(xmltv(combined))
     report['combined_channels'] = len(combined)
+    report['international_regions_available'] = len(report['regions'])
+    report['extended_xmltv_only'] = sorted(set(report['regions']) - CATALOG_REGIONS)
+    report['main_guide_regions'] = sorted(CATALOG_REGIONS)
     report['duplicate_xmltv_ids_first_source_wins'] = duplicate_ids
     manifest = {
         'id': 'com.kevin2296.nuvio.epg', 'version': '1.1.0', 'name': 'Nuvio EPG · TV-gids',
@@ -381,20 +395,29 @@ def build(output: Path, feeds: dict, now: datetime, base=BASE, source_status=Non
 def generate(output: Path, now=None):
     now = now or datetime.now(UTC)
     feeds, status = {}, {}
-    for region, (_, source, _) in REGIONS.items():
+    def load_region(pair):
+        region, (_, source, _) = pair
         try:
             raw = fetch(f'https://epgshare01.online/epgshare01/epg_ripper_{source}.xml.gz')
-            parse(raw, now)  # Validate before considering this source healthy.
-            feeds[region], status[region] = raw, 'fresh'
+            parse(raw, now)
+            return region, raw, 'fresh'
         except Exception:
-            # Exception messages can contain URLs or response data: never print them.
+            # No exception text: upstream URLs and internal details stay out of logs.
             try:
                 raw = fetch(BASE + '/epg/' + region.lower() + '.xml.gz')
                 parse(raw, now)
-                feeds[region], status[region] = raw, 'previous-public-snapshot'
+                return region, raw, 'previous-public-snapshot'
             except Exception:
-                status[region] = 'unavailable'
-        print(region + ': ' + status[region], flush=True)
+                return region, None, 'unavailable'
+
+    # Independent countries can download concurrently. Parsing/building remains
+    # sequential to limit peak memory and avoid loading all XML trees at once.
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        for region, raw, state in pool.map(load_region, REGIONS.items()):
+            status[region] = state
+            if raw is not None:
+                feeds[region] = raw
+            print(region + ': ' + state, flush=True)
     # All-source failure leaves the existing published branch untouched.
     return build(output, feeds, now, source_status=status)
 
