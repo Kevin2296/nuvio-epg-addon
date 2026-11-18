@@ -78,7 +78,6 @@ REGIONS = {
     'IL': ('Israël', 'IL1', 'Asia/Jerusalem'),
     'AE': ('Verenigde Arabische Emiraten', 'AE1', 'Asia/Dubai'),
     'ZA': ('Zuid-Afrika', 'ZA1', 'Africa/Johannesburg'),
-    'UA': ('Oekraïne', 'UA1', 'Europe/Kyiv'),
     'LV': ('Letland', 'LV1', 'Europe/Riga'),
     'LT': ('Litouwen', 'LT1', 'Europe/Vilnius'),
     'CY': ('Cyprus', 'CY1', 'Asia/Nicosia'),
@@ -93,7 +92,7 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 def fetch(url: str) -> bytes:
     """Only code-defined public feed URLs are passed here; no config URL inputs."""
     request = urllib.request.Request(url, headers={'User-Agent': USER_AGENT})
-    with urllib.request.build_opener(NoRedirect()).open(request, timeout=90) as response:
+    with urllib.request.build_opener(NoRedirect()).open(request, timeout=45) as response:
         if response.status != 200:
             raise ValueError('download status')
         raw = response.read(MAX_COMPRESSED + 1)
@@ -129,6 +128,20 @@ def text(element, name, limit=200):
     return ' '.join((element.findtext(name) or '').split())[:limit]
 
 
+# Reject potentially sensitive source strings, while retaining ordinary programme summaries.
+SENSITIVE_DETAIL = re.compile(
+    r'(?i)(?:https?://|rtsp://|rtmp://|private provider|'
+    r'\\b(?:password|passwd|username|api[_-]?key|token|xtream)\\s*[:=])'
+)
+
+
+def safe_detail(value: str, limit: int) -> str:
+    value = ' '.join(value.split())
+    if SENSITIVE_DETAIL.search(value):
+        return ''
+    return value[:limit]
+
+
 def parse(raw: bytes, now: datetime):
     """Return whitelisted channel names and valid schedules; never pass URLs through."""
     names, programmes = {}, defaultdict(list)
@@ -157,7 +170,16 @@ def parse(raw: bytes, now: datetime):
                 if not title or not cid or len(cid) > 256 or stop <= start:
                     raise ValueError('programme')
                 if stop > now and start < end:
-                    programmes[cid].append((start, stop, title))
+                    # Preserve only plain textual XMLTV fields Nuvio actually understands.
+                    # External icons, remote URLs and source-specific extensions stay private.
+                    desc = safe_detail(text(node, 'desc', 1600), 600)
+                    category = safe_detail(text(node, 'category', 90), 80)
+                    subtitle = safe_detail(text(node, 'sub-title', 160), 140)
+                    episode_node = node.find('episode-num')
+                    episode = (safe_detail(''.join(episode_node.itertext()), 40)
+                               if episode_node is not None and
+                               episode_node.get('system') in (None, 'onscreen') else '')
+                    programmes[cid].append((start, stop, title, desc, category, subtitle, episode))
             except ValueError:
                 invalid += 1
             node.clear()
@@ -178,9 +200,13 @@ def parse(raw: bytes, now: datetime):
             result[cid] = {'name': names[cid], 'programmes': accepted}
     if not result:
         raise ValueError('no usable programmes')
-    current = sum(any(start <= now < stop for start, stop, _ in ch['programmes']) for ch in result.values())
+    current = sum(any(p[0] <= now < p[1] for p in ch['programmes']) for ch in result.values())
+    with_desc = sum(any(p[3] for p in ch['programmes']) for ch in result.values())
+    latest = max((p[1] for ch in result.values() for p in ch['programmes']), default=now)
     return result, {'declared_channels': len(names), 'channels_with_schedule': len(result),
                     'channels_on_air_now': current, 'channels_without_current_programme': len(result) - current,
+                    'channels_with_descriptions': with_desc,
+                    'latest_programme_end': iso(latest),
                     'invalid_programmes': invalid, 'overlaps_removed': overlaps}
 
 
@@ -224,9 +250,12 @@ def description(region, programmes, now):
     lines = ['TV-gids · geen videostreams.',
              'Bijgewerkt: ' + now.strftime('%d-%m-%Y %H:%M UTC'),
              'Tijden hieronder: ' + zone_name + '.', '']
-    for start, stop, title in programmes[:12]:
+    for program in programmes[:12]:
+        start, stop, title = program[:3]
         lines.append(start.astimezone(zone).strftime('%d-%m %H:%M') + '–' +
                      stop.astimezone(zone).strftime('%H:%M') + '  ' + title)
+        if len(program) >= 4 and program[3]:
+            lines.append('  ' + program[3][:120])
     lines.extend(['', 'Gebruik de XMLTV-link uit de README voor de geïntegreerde Live TV-gids.'])
     return '\n'.join(lines)
 
@@ -237,11 +266,21 @@ def xmltv(channels):
         ch = ET.SubElement(root, 'channel', {'id': cid})
         ET.SubElement(ch, 'display-name').text = item['name']
     for cid, item in channels.items():
-        for start, stop, title in item['programmes']:
+        for program in item['programmes']:
+            start, stop, title = program[:3]
+            desc, category, subtitle, episode = (list(program[3:]) + ['', '', '', ''])[:4]
             p = ET.SubElement(root, 'programme', {
                 'channel': cid, 'start': start.strftime('%Y%m%d%H%M%S +0000'),
                 'stop': stop.strftime('%Y%m%d%H%M%S +0000')})
             ET.SubElement(p, 'title').text = title
+            if subtitle:
+                ET.SubElement(p, 'sub-title').text = subtitle
+            if desc:
+                ET.SubElement(p, 'desc').text = desc
+            if category:
+                ET.SubElement(p, 'category').text = category
+            if episode:
+                ET.SubElement(p, 'episode-num', {'system': 'onscreen'}).text = episode
     return gzip.compress(ET.tostring(root, encoding='utf-8', xml_declaration=True), mtime=0)
 
 
@@ -270,18 +309,24 @@ def build(output: Path, feeds: dict, now: datetime, base=BASE, source_status=Non
             else:
                 duplicate_ids += 1
         report['regions'][region] = counts
-        label = REGIONS[region][0]
         slug = region.lower()
+        (output / 'epg').mkdir(exist_ok=True)
+        (output / 'epg' / f'{slug}.xml.gz').write_bytes(xmltv(channels))
+        # Extended international XMLTV coverage without enormous addon catalogues.
+        if region not in CATALOG_REGIONS:
+            continue
+        label = REGIONS[region][0]
         catalogs.append({'id': slug, 'type': 'tv', 'name': 'TV-gids · ' + label,
                          'pageSize': PAGE_SIZE, 'extra': [{'name': 'skip'}, {'name': 'date'}]})
         metas = []
         for source_id, item in sorted(channels.items(), key=lambda row: row[1]['name'].casefold()):
             cid = channel_id(region, source_id)
             poster(output, cid, region, item['name'])
-            videos = [{'id': cid + '_epg_' + str(int(start.timestamp())),
-                       'title': title, 'released': iso(start), 'startTime': iso(start),
-                       'endTime': iso(stop), 'runtime': str(int((stop - start).total_seconds() // 60)) + ' min'}
-                      for start, stop, title in item['programmes']]
+            videos = [{'id': cid + '_epg_' + str(int(p[0].timestamp())),
+                       'title': p[2], 'released': iso(p[0]), 'startTime': iso(p[0]),
+                       'endTime': iso(p[1]), 'runtime': str(int((p[1] - p[0]).total_seconds() // 60)) + ' min',
+                       **({'description': p[3]} if p[3] else {})}
+                      for p in item['programmes']]
             meta = {'id': cid, 'type': 'tv', 'name': item['name'], 'country': region,
                     'poster': base + '/assets/' + cid + '.svg', 'posterShape': 'square',
                     'genres': ['TV-gids', label], 'description': description(region, item['programmes'], now),
@@ -290,9 +335,6 @@ def build(output: Path, feeds: dict, now: datetime, base=BASE, source_status=Non
             write_json(output, f'meta/tv/{cid}.json', {'meta': meta, 'cacheMaxAge': 900})
             # Explicit empty response: no stream credentials ever enter this addon.
             write_json(output, f'stream/tv/{cid}.json', {'streams': []})
-        (output / 'epg').mkdir(exist_ok=True)
-        (output / 'epg' / f'{slug}.xml.gz').write_bytes(xmltv(channels))
-
         # Standard discovery + EPG day pages, including exact terminal-page offsets.
         # A short page is not terminal in the addon protocol.
         skips = list(range(0, len(metas), PAGE_SIZE)) + [len(metas)]
