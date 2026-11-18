@@ -130,7 +130,7 @@ class AddonTests(unittest.TestCase):
     def test_fourteen_day_window_preserves_real_metadata_without_inventing_shows(self):
         root = ET.fromstring(feed())
         current = root.findall('programme')[1]
-        ET.SubElement(current, 'desc').text = 'A factual show summary from the source.'
+        current.find('desc').text = 'A factual show summary from the source.'
         ET.SubElement(current, 'category').text = 'Documentary'
         ET.SubElement(current, 'sub-title').text = 'Episode subtitle'
         ET.SubElement(current, 'episode-num', system='onscreen').text = 'S1 E2'
