@@ -16,6 +16,8 @@ The public addon is **not** a private Xtream/M3U processor. It imports curated r
 
 A tutorial referencing scraping ([Cloudje IPTV EPG guide](https://cloudje.eu/iptv-epg-guide/)) is useful for locating possible tools, **not evidence that data from those sites may be republished**.
 
+In the 19 November 2026 full-source smoke test, the Spanish EPGShare01 feed downloaded correctly but had **no current or upcoming listings**. It is therefore omitted from the exported set rather than inventing data. For personal use, the independent [IPTV-EPG.org Spain XMLTV](https://iptv-epg.org/files/epg-es.xml) is another source to configure **directly in Nuvio/TiviMate**, subject to its applicable usage terms. It is not automatically mirrored in this public repository.
+
 ## Match behavior and descriptions
 
 1. Preserve original XMLTV channel `id` and primary display name to maintain existing Nuvio/TiviMate `tvg-id` matches.
