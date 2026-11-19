@@ -1,0 +1,39 @@
+name: One-off full region EPG verification
+
+on:
+  push:
+    branches: [feature/international-epg-14day-details]
+    paths: [.github/workflows/full-epg-check.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Run tests
+        run: python3 -m unittest -v test_addon
+      - name: Generate all regional XMLTV with no publication
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 addon.py --output full-smoke-output
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          output = Path('full-smoke-output')
+          result = json.loads((output / 'quality.json').read_text())
+          sizes = sorted([(p.stat().st_size, p.name) for p in (output / 'epg').glob('*.xml.gz')], reverse=True)
+          print('Countries configured:', len(__import__('addon').REGIONS))
+          print('Countries generated:', result['international_regions_available'])
+          print('Core channel count:', result['combined_channels'])
+          print('Top 5 regional compressed sizes:', sizes[:5])
+          print('Files:', sum(1 for p in output.rglob('*') if p.is_file()))
+          assert result['window_days'] == 14
+          assert result['combined_channels'] > 1000
+          assert result['international_regions_available'] >= 25, 'Review missing source IDs and data'
+          assert max(size for size, _ in sizes) < 100_000_000, 'GitHub max file size'
+          PY
