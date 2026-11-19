@@ -29,5 +29,7 @@ jobs:
                   break
               except Exception as e:
                   print('attempt', i + 1, 'error type', type(e).__name__,
-                        'http_status', e.code if isinstance(e, HTTPError) else None)
+                        'http_status', e.code if isinstance(e, HTTPError) else None,
+                        'reason', str(e) if isinstance(e, ValueError) and str(e) in
+                        ('XML size', 'unsafe XML', 'XML root', 'no usable programmes') else 'unclassified')
           PY
