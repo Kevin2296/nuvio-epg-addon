@@ -188,9 +188,20 @@ def parse(raw: bytes, now: datetime):
     for cid, items in programmes.items():
         if cid not in names:
             continue
+        # Two sources sometimes repeat one timeslot with different metadata.
+        # Keep its richest textual entry rather than discarding the description.
+        slots = {}
+        for programme in items:
+            key = programme[:2]
+            previous = slots.get(key)
+            def detail_score(p):
+                return (bool(p[3]), bool(p[4]), bool(p[5]), bool(p[6]),
+                        sum(len(v) for v in p[3:]))
+            if previous is None or detail_score(programme) > detail_score(previous):
+                slots[key] = programme
         accepted = []
         last_stop = None
-        for programme in sorted(set(items)):
+        for programme in sorted(slots.values(), key=lambda p: (p[0], p[1])):
             start, stop = programme[:2]
             if last_stop is not None and start < last_stop:
                 overlaps += 1
