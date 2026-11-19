@@ -413,14 +413,15 @@ def generate(output: Path, now=None):
             raw = fetch(f'https://epgshare01.online/epgshare01/epg_ripper_{source}.xml.gz')
             parse(raw, now)
             return region, raw, 'fresh'
-        except Exception:
-            # No exception text: upstream URLs and internal details stay out of logs.
+        except Exception as error:
+            # Do not log exception text: network errors might contain URL details.
+            no_schedule = isinstance(error, ValueError) and str(error) == 'no usable programmes'
             try:
                 raw = fetch(BASE + '/epg/' + region.lower() + '.xml.gz')
                 parse(raw, now)
                 return region, raw, 'previous-public-snapshot'
             except Exception:
-                return region, None, 'unavailable'
+                return region, None, ('no-current-programmes' if no_schedule else 'unavailable')
 
     # Independent countries can download concurrently. Parsing/building remains
     # sequential to limit peak memory and avoid loading all XML trees at once.
