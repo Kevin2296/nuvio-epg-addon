@@ -121,6 +121,27 @@ class AddonTests(unittest.TestCase):
         self.assertEqual(len(root.findall('channel')), 1)
         self.assertEqual(report['duplicate_xmltv_ids_first_source_wins'], 1)
 
+    def test_expired_country_reported_without_failing_other_regions(self):
+        custom_regions = {'NL': addon.REGIONS['NL'], 'ES': addon.REGIONS['ES']}
+        expired_root = ET.fromstring(feed())
+        for programme in expired_root.findall('programme'):
+            programme.set('start', '20260101090000 +0000')
+            programme.set('stop', '20260101100000 +0000')
+        expired = gzip.compress(ET.tostring(expired_root))
+        def fake_fetch(url):
+            if 'ES1' in url or url.endswith('/epg/es.xml.gz'):
+                return expired
+            return gzip.compress(feed())
+        with patch.object(addon, 'REGIONS', custom_regions), patch.object(
+            addon, 'fetch', side_effect=fake_fetch
+        ):
+            report = addon.generate(self.output, NOW)
+        self.assertEqual(report['source_status']['ES'], 'no-current-programmes')
+        self.assertEqual(report['source_status']['NL'], 'fresh')
+        self.assertEqual(report['international_regions_available'], 1)
+        self.assertTrue((self.output / 'epg/nl.xml.gz').exists())
+        self.assertFalse((self.output / 'epg/es.xml.gz').exists())
+
     def test_all_source_failure_does_not_create_published_output(self):
         with patch.object(addon, 'fetch', side_effect=ValueError('do not log secret URL')):
             with self.assertRaises(ValueError): addon.generate(self.output, NOW)
