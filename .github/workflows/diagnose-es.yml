@@ -1,0 +1,33 @@
+name: One-off Spain EPG source probe
+
+on:
+  push:
+    branches: [feature/international-epg-14day-details]
+    paths: [.github/workflows/diagnose-es.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Probe Spain without printing public or private URLs
+        run: |
+          python3 - <<'PY'
+          import addon
+          from datetime import datetime, timezone
+          from urllib.error import HTTPError
+          for i in range(2):
+              try:
+                  raw = addon.fetch('https://epgshare01.online/epgshare01/epg_ripper_ES1.xml.gz')
+                  print('fetch success size', len(raw))
+                  parsed, info = addon.parse(raw, datetime.now(timezone.utc))
+                  print('parse success', info)
+                  break
+              except Exception as e:
+                  print('attempt', i + 1, 'error type', type(e).__name__,
+                        'http_status', e.code if isinstance(e, HTTPError) else None)
+          PY
