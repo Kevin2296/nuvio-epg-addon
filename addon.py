@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 import gzip
 import hashlib
@@ -21,6 +22,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 UTC = timezone.utc
 PAGE_SIZE = 100
+WINDOW_DAYS = 14
+CATALOG_REGIONS = frozenset({'NL', 'BE', 'DE', 'PL', 'US', 'UK'})
 MAX_COMPRESSED = 32 * 1024 * 1024
 MAX_XML = 160 * 1024 * 1024
 BASE = 'https://raw.githubusercontent.com/Kevin2296/nuvio-epg-addon/epg-data/public'
@@ -32,6 +35,52 @@ REGIONS = {
     'PL': ('Polen', 'PL1', 'Europe/Warsaw'),
     'US': ('Verenigde Staten', 'US2', 'America/New_York'),
     'UK': ('Verenigd Koninkrijk', 'UK1', 'Europe/London'),
+    'FR': ('Frankrijk', 'FR1', 'Europe/Paris'),
+    'ES': ('Spanje', 'ES1', 'Europe/Madrid'),
+    'IT': ('Italië', 'IT1', 'Europe/Rome'),
+    'PT': ('Portugal', 'PT1', 'Europe/Lisbon'),
+    'AT': ('Oostenrijk', 'AT1', 'Europe/Vienna'),
+    'CH': ('Zwitserland', 'CH1', 'Europe/Zurich'),
+    'LU': ('Luxemburg', 'LU1', 'Europe/Luxembourg'),
+    'IE': ('Ierland', 'IE1', 'Europe/Dublin'),
+    'CZ': ('Tsjechië', 'CZ1', 'Europe/Prague'),
+    'SK': ('Slowakije', 'SK1', 'Europe/Bratislava'),
+    'HU': ('Hongarije', 'HU1', 'Europe/Budapest'),
+    'RO': ('Roemenië', 'RO1', 'Europe/Bucharest'),
+    'HR': ('Kroatië', 'HR1', 'Europe/Zagreb'),
+    'RS': ('Servië', 'RS1', 'Europe/Belgrade'),
+    'BA': ('Bosnië en Herzegovina', 'BA1', 'Europe/Sarajevo'),
+    'BG': ('Bulgarije', 'BG1', 'Europe/Sofia'),
+    'GR': ('Griekenland', 'GR1', 'Europe/Athens'),
+    'TR': ('Turkije', 'TR3', 'Europe/Istanbul'),
+    'DK': ('Denemarken', 'DK1', 'Europe/Copenhagen'),
+    'SE': ('Zweden', 'SE1', 'Europe/Stockholm'),
+    'NO': ('Noorwegen', 'NO1', 'Europe/Oslo'),
+    'FI': ('Finland', 'FI1', 'Europe/Helsinki'),
+    'CA': ('Canada', 'CA2', 'America/Toronto'),
+    'AU': ('Australië', 'AU1', 'Australia/Sydney'),
+    'NZ': ('Nieuw-Zeeland', 'NZ1', 'Pacific/Auckland'),
+    'BR': ('Brazilië', 'BR1', 'America/Sao_Paulo'),
+    'MX': ('Mexico', 'MX1', 'America/Mexico_City'),
+    'AR': ('Argentinië', 'AR1', 'America/Argentina/Buenos_Aires'),
+    'CL': ('Chili', 'CL1', 'America/Santiago'),
+    'CO': ('Colombia', 'CO1', 'America/Bogota'),
+    'EC': ('Ecuador', 'EC1', 'America/Guayaquil'),
+    'PE': ('Peru', 'PE1', 'America/Lima'),
+    'UY': ('Uruguay', 'UY1', 'America/Montevideo'),
+    'JP': ('Japan', 'JP1', 'Asia/Tokyo'),
+    'KR': ('Zuid-Korea', 'KR1', 'Asia/Seoul'),
+    'HK': ('Hongkong', 'HK1', 'Asia/Hong_Kong'),
+    'SG': ('Singapore', 'SG1', 'Asia/Singapore'),
+    'MY': ('Maleisië', 'MY1', 'Asia/Kuala_Lumpur'),
+    'ID': ('Indonesië', 'ID1', 'Asia/Jakarta'),
+    'IN': ('India', 'IN1', 'Asia/Kolkata'),
+    'IL': ('Israël', 'IL1', 'Asia/Jerusalem'),
+    'AE': ('Verenigde Arabische Emiraten', 'AE1', 'Asia/Dubai'),
+    'ZA': ('Zuid-Afrika', 'ZA1', 'Africa/Johannesburg'),
+    'LV': ('Letland', 'LV1', 'Europe/Riga'),
+    'LT': ('Litouwen', 'LT1', 'Europe/Vilnius'),
+    'CY': ('Cyprus', 'CY1', 'Asia/Nicosia'),
 }
 
 
@@ -43,7 +92,7 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 def fetch(url: str) -> bytes:
     """Only code-defined public feed URLs are passed here; no config URL inputs."""
     request = urllib.request.Request(url, headers={'User-Agent': USER_AGENT})
-    with urllib.request.build_opener(NoRedirect()).open(request, timeout=90) as response:
+    with urllib.request.build_opener(NoRedirect()).open(request, timeout=45) as response:
         if response.status != 200:
             raise ValueError('download status')
         raw = response.read(MAX_COMPRESSED + 1)
@@ -79,10 +128,24 @@ def text(element, name, limit=200):
     return ' '.join((element.findtext(name) or '').split())[:limit]
 
 
+# Reject potentially sensitive source strings, while retaining ordinary programme summaries.
+SENSITIVE_DETAIL = re.compile(
+    r'(?i)(?:https?://|rtsp://|rtmp://|private provider|'
+    r'\b(?:password|passwd|username|api[_-]?key|token|xtream)\s*[:=])'
+)
+
+
+def safe_detail(value: str, limit: int) -> str:
+    value = ' '.join(value.split())
+    if SENSITIVE_DETAIL.search(value):
+        return ''
+    return value[:limit]
+
+
 def parse(raw: bytes, now: datetime):
     """Return whitelisted channel names and valid schedules; never pass URLs through."""
     names, programmes = {}, defaultdict(list)
-    end = now + timedelta(hours=72)
+    end = now + timedelta(days=WINDOW_DAYS)
     invalid = 0
     raw = xml_bytes(raw)
     root_tag = None
@@ -107,7 +170,16 @@ def parse(raw: bytes, now: datetime):
                 if not title or not cid or len(cid) > 256 or stop <= start:
                     raise ValueError('programme')
                 if stop > now and start < end:
-                    programmes[cid].append((start, stop, title))
+                    # Preserve only plain textual XMLTV fields Nuvio actually understands.
+                    # External icons, remote URLs and source-specific extensions stay private.
+                    desc = safe_detail(text(node, 'desc', 1600), 600)
+                    category = safe_detail(text(node, 'category', 90), 80)
+                    subtitle = safe_detail(text(node, 'sub-title', 160), 140)
+                    episode_node = node.find('episode-num')
+                    episode = (safe_detail(''.join(episode_node.itertext()), 40)
+                               if episode_node is not None and
+                               episode_node.get('system') in (None, 'onscreen') else '')
+                    programmes[cid].append((start, stop, title, desc, category, subtitle, episode))
             except ValueError:
                 invalid += 1
             node.clear()
@@ -116,21 +188,37 @@ def parse(raw: bytes, now: datetime):
     for cid, items in programmes.items():
         if cid not in names:
             continue
+        # Two sources sometimes repeat one timeslot with different metadata.
+        # Keep its richest textual entry rather than discarding the description.
+        slots = {}
+        for programme in items:
+            key = programme[:2]
+            previous = slots.get(key)
+            def detail_score(p):
+                return (bool(p[3]), bool(p[4]), bool(p[5]), bool(p[6]),
+                        sum(len(v) for v in p[3:]))
+            if previous is None or detail_score(programme) > detail_score(previous):
+                slots[key] = programme
         accepted = []
         last_stop = None
-        for start, stop, title in sorted(set(items)):
+        for programme in sorted(slots.values(), key=lambda p: (p[0], p[1])):
+            start, stop = programme[:2]
             if last_stop is not None and start < last_stop:
                 overlaps += 1
                 continue
-            accepted.append((start, stop, title))
+            accepted.append(programme)
             last_stop = stop
         if accepted:
             result[cid] = {'name': names[cid], 'programmes': accepted}
     if not result:
         raise ValueError('no usable programmes')
-    current = sum(any(start <= now < stop for start, stop, _ in ch['programmes']) for ch in result.values())
+    current = sum(any(p[0] <= now < p[1] for p in ch['programmes']) for ch in result.values())
+    with_desc = sum(any(p[3] for p in ch['programmes']) for ch in result.values())
+    latest = max((p[1] for ch in result.values() for p in ch['programmes']), default=now)
     return result, {'declared_channels': len(names), 'channels_with_schedule': len(result),
                     'channels_on_air_now': current, 'channels_without_current_programme': len(result) - current,
+                    'channels_with_descriptions': with_desc,
+                    'latest_programme_end': iso(latest),
                     'invalid_programmes': invalid, 'overlaps_removed': overlaps}
 
 
@@ -174,24 +262,47 @@ def description(region, programmes, now):
     lines = ['TV-gids · geen videostreams.',
              'Bijgewerkt: ' + now.strftime('%d-%m-%Y %H:%M UTC'),
              'Tijden hieronder: ' + zone_name + '.', '']
-    for start, stop, title in programmes[:12]:
+    for program in programmes[:12]:
+        start, stop, title = program[:3]
         lines.append(start.astimezone(zone).strftime('%d-%m %H:%M') + '–' +
                      stop.astimezone(zone).strftime('%H:%M') + '  ' + title)
+        if len(program) >= 4 and program[3]:
+            lines.append('  ' + program[3][:120])
     lines.extend(['', 'Gebruik de XMLTV-link uit de README voor de geïntegreerde Live TV-gids.'])
     return '\n'.join(lines)
 
 
-def xmltv(channels):
+def xmltv(channels, region=None):
     root = ET.Element('tv', {'generator-info-name': 'Nuvio EPG Addon'})
+    # "SBS" can be an ambiguous abbreviation worldwide, but in the Dutch
+    # feed it can safely alias SBS 6 only when no competing SBS channels exist.
+    sbs = [(cid, item) for cid, item in channels.items()
+           if (item.get('region', region) == 'NL' and
+               ''.join(c for c in item['name'].casefold() if c.isalnum()).startswith('sbs'))]
+    sbs6 = [cid for cid, item in sbs
+            if ''.join(c for c in item['name'].casefold() if c.isalnum()) == 'sbs6']
+    safe_sbs = set(sbs6) if len(sbs) == len(sbs6) == 1 else set()
     for cid, item in channels.items():
         ch = ET.SubElement(root, 'channel', {'id': cid})
         ET.SubElement(ch, 'display-name').text = item['name']
+        if cid in safe_sbs:
+            ET.SubElement(ch, 'display-name').text = 'SBS'
     for cid, item in channels.items():
-        for start, stop, title in item['programmes']:
+        for program in item['programmes']:
+            start, stop, title = program[:3]
+            desc, category, subtitle, episode = (list(program[3:]) + ['', '', '', ''])[:4]
             p = ET.SubElement(root, 'programme', {
                 'channel': cid, 'start': start.strftime('%Y%m%d%H%M%S +0000'),
                 'stop': stop.strftime('%Y%m%d%H%M%S +0000')})
             ET.SubElement(p, 'title').text = title
+            if subtitle:
+                ET.SubElement(p, 'sub-title').text = subtitle
+            if desc:
+                ET.SubElement(p, 'desc').text = desc
+            if category:
+                ET.SubElement(p, 'category').text = category
+            if episode:
+                ET.SubElement(p, 'episode-num', {'system': 'onscreen'}).text = episode
     return gzip.compress(ET.tostring(root, encoding='utf-8', xml_declaration=True), mtime=0)
 
 
@@ -207,30 +318,38 @@ def build(output: Path, feeds: dict, now: datetime, base=BASE, source_status=Non
     catalogs = []
     combined = {}
     duplicate_ids = 0
-    report = {'generated_at': iso(now), 'window_hours': 72, 'regions': {},
+    report = {'generated_at': iso(now), 'window_hours': WINDOW_DAYS * 24,
+              'window_days': WINDOW_DAYS, 'regions': {},
               'guide_only': True, 'source_status': source_status or {}}
     for region in REGIONS:
         if region not in feeds:
             continue
         channels, counts = parse(feeds[region], now)
         for source_id, item in channels.items():
-            if source_id not in combined:
-                combined[source_id] = item
-            else:
-                duplicate_ids += 1
+            if region in CATALOG_REGIONS:
+                if source_id not in combined:
+                    combined[source_id] = {**item, 'region': region}
+                else:
+                    duplicate_ids += 1
         report['regions'][region] = counts
-        label = REGIONS[region][0]
         slug = region.lower()
+        (output / 'epg').mkdir(exist_ok=True)
+        (output / 'epg' / f'{slug}.xml.gz').write_bytes(xmltv(channels, region))
+        # Extended international XMLTV coverage without enormous addon catalogues.
+        if region not in CATALOG_REGIONS:
+            continue
+        label = REGIONS[region][0]
         catalogs.append({'id': slug, 'type': 'tv', 'name': 'TV-gids · ' + label,
                          'pageSize': PAGE_SIZE, 'extra': [{'name': 'skip'}, {'name': 'date'}]})
         metas = []
         for source_id, item in sorted(channels.items(), key=lambda row: row[1]['name'].casefold()):
             cid = channel_id(region, source_id)
             poster(output, cid, region, item['name'])
-            videos = [{'id': cid + '_epg_' + str(int(start.timestamp())),
-                       'title': title, 'released': iso(start), 'startTime': iso(start),
-                       'endTime': iso(stop), 'runtime': str(int((stop - start).total_seconds() // 60)) + ' min'}
-                      for start, stop, title in item['programmes']]
+            videos = [{'id': cid + '_epg_' + str(int(p[0].timestamp())),
+                       'title': p[2], 'released': iso(p[0]), 'startTime': iso(p[0]),
+                       'endTime': iso(p[1]), 'runtime': str(int((p[1] - p[0]).total_seconds() // 60)) + ' min',
+                       **({'description': p[3]} if p[3] else {})}
+                      for p in item['programmes']]
             meta = {'id': cid, 'type': 'tv', 'name': item['name'], 'country': region,
                     'poster': base + '/assets/' + cid + '.svg', 'posterShape': 'square',
                     'genres': ['TV-gids', label], 'description': description(region, item['programmes'], now),
@@ -239,9 +358,6 @@ def build(output: Path, feeds: dict, now: datetime, base=BASE, source_status=Non
             write_json(output, f'meta/tv/{cid}.json', {'meta': meta, 'cacheMaxAge': 900})
             # Explicit empty response: no stream credentials ever enter this addon.
             write_json(output, f'stream/tv/{cid}.json', {'streams': []})
-        (output / 'epg').mkdir(exist_ok=True)
-        (output / 'epg' / f'{slug}.xml.gz').write_bytes(xmltv(channels))
-
         # Standard discovery + EPG day pages, including exact terminal-page offsets.
         # A short page is not terminal in the addon protocol.
         skips = list(range(0, len(metas), PAGE_SIZE)) + [len(metas)]
@@ -252,8 +368,8 @@ def build(output: Path, feeds: dict, now: datetime, base=BASE, source_status=Non
             if skip == 0:
                 write_json(output, f'catalog/tv/{slug}.json', payload)
             write_json(output, f'catalog/tv/{slug}/skip={skip}.json', payload)
-            # Covers midnight crossings and the entire 72-hour window.
-            for offset in range(-1, 5):
+            # Covers midnight crossings and the entire publication window.
+            for offset in range(-1, WINDOW_DAYS + 2):
                 day = (now + timedelta(days=offset)).date()
                 start = datetime.combine(day, datetime.min.time(), tzinfo=UTC)
                 stop = start + timedelta(days=1)
@@ -270,9 +386,12 @@ def build(output: Path, feeds: dict, now: datetime, base=BASE, source_status=Non
         raise ValueError('no healthy regions')
     (output / 'epg' / 'all.xml.gz').write_bytes(xmltv(combined))
     report['combined_channels'] = len(combined)
+    report['international_regions_available'] = len(report['regions'])
+    report['extended_xmltv_only'] = sorted(set(report['regions']) - CATALOG_REGIONS)
+    report['main_guide_regions'] = sorted(CATALOG_REGIONS)
     report['duplicate_xmltv_ids_first_source_wins'] = duplicate_ids
     manifest = {
-        'id': 'com.kevin2296.nuvio.epg', 'version': '1.0.0', 'name': 'Nuvio EPG · TV-gids',
+        'id': 'com.kevin2296.nuvio.epg', 'version': '1.1.0', 'name': 'Nuvio EPG · TV-gids',
         'description': 'Internationale tv-gids. Alleen gidsinformatie; geen IPTV-login of videostreams. '
                        'Gebruik de XMLTV-links uit de README voor de ingebouwde Live TV-gids.',
         'resources': ['catalog', 'meta', 'stream'], 'types': ['tv'], 'idPrefixes': ['kepg_'],
@@ -288,20 +407,30 @@ def build(output: Path, feeds: dict, now: datetime, base=BASE, source_status=Non
 def generate(output: Path, now=None):
     now = now or datetime.now(UTC)
     feeds, status = {}, {}
-    for region, (_, source, _) in REGIONS.items():
+    def load_region(pair):
+        region, (_, source, _) = pair
         try:
             raw = fetch(f'https://epgshare01.online/epgshare01/epg_ripper_{source}.xml.gz')
-            parse(raw, now)  # Validate before considering this source healthy.
-            feeds[region], status[region] = raw, 'fresh'
-        except Exception:
-            # Exception messages can contain URLs or response data: never print them.
+            parse(raw, now)
+            return region, raw, 'fresh'
+        except Exception as error:
+            # Do not log exception text: network errors might contain URL details.
+            no_schedule = isinstance(error, ValueError) and str(error) == 'no usable programmes'
             try:
                 raw = fetch(BASE + '/epg/' + region.lower() + '.xml.gz')
                 parse(raw, now)
-                feeds[region], status[region] = raw, 'previous-public-snapshot'
+                return region, raw, 'previous-public-snapshot'
             except Exception:
-                status[region] = 'unavailable'
-        print(region + ': ' + status[region], flush=True)
+                return region, None, ('no-current-programmes' if no_schedule else 'unavailable')
+
+    # Independent countries can download concurrently. Parsing/building remains
+    # sequential to limit peak memory and avoid loading all XML trees at once.
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        for region, raw, state in pool.map(load_region, REGIONS.items()):
+            status[region] = state
+            if raw is not None:
+                feeds[region] = raw
+            print(region + ': ' + state, flush=True)
     # All-source failure leaves the existing published branch untouched.
     return build(output, feeds, now, source_status=status)
 
