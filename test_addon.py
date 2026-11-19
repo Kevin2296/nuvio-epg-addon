@@ -170,6 +170,19 @@ class AddonTests(unittest.TestCase):
         self.assertEqual([x.text for x in xml.find('channel').findall('display-name')],
                          ['SBS 6', 'SBS'])
 
+    def test_duplicate_timeslot_keeps_richer_description(self):
+        root = ET.fromstring(feed())
+        with_description = root.findall('programme')[1]
+        with_description.find('desc').text = 'Detailed synopsis'
+        without_description = ET.fromstring(ET.tostring(with_description))
+        without_description.find('desc').text = ''
+        root.insert(list(root).index(with_description), without_description)
+        parsed, quality = addon.parse(ET.tostring(root), NOW)
+        shows = parsed['station/0.nl']['programmes']
+        self.assertEqual(len(shows), 3)
+        self.assertEqual(shows[0][3], 'Detailed synopsis')
+        self.assertEqual(quality['channels_with_descriptions'], 1)
+
     def test_sensitive_description_is_dropped(self):
         root = ET.fromstring(feed())
         for p in root.findall('programme'):
