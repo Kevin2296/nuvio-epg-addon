@@ -22,7 +22,7 @@ https://raw.githubusercontent.com/Kevin2296/nuvio-epg-addon/epg-data/public/epg/
 
 Nuvio gebruikt zijn bestaande kanaalmatching en handmatige **Change EPG**-toewijzing. Je playlist en provider-login blijven op je apparaat. Dezelfde link werkt als aanvullende XMLTV-bron in TiviMate. Wil je kleinere bestanden of een andere bronkeuze? Vervang `all.xml.gz` door `nl.xml.gz`, `be.xml.gz`, `de.xml.gz`, `pl.xml.gz`, `us.xml.gz` of `uk.xml.gz`. Het bestaande `all.xml.gz` blijft bewust de compacte combinatie van deze zes kernregio's.
 
-Dit zijn bronregio's, geen garantie dat iedere zender uit dat land komt. `all.xml.gz` bevat niet automatisch alle aanvullende landen. Bij gelijke XMLTV-ID's kiest de gecombineerde gids de eerste bruikbare bron in de volgorde NL, BE, DE, PL, US, UK. XXX voeg je zo nodig privé in Nuvio toe; er is geen aparte automatische XXX-bron en geen gegarandeerde classificatie van volwassen zenders in externe landengidsen.
+Dit zijn bronregio's, geen garantie dat iedere zender uit dat land komt. `all.xml.gz` bevat niet automatisch alle aanvullende landen. Bij gelijke XMLTV-ID's kiest de gecombineerde publieke gids de eerste bruikbare bron in de volgorde NL, BE, DE, PL, US, UK. XXX voeg je zo nodig privé in Nuvio toe; er is geen aparte automatische XXX-bron en geen gegarandeerde classificatie van volwassen zenders in externe landengidsen.
 
 ## Wereldwijde XMLTV-uitbreiding (14-daags maximum)
 
@@ -34,13 +34,30 @@ Een extra land toevoegen in Nuvio of TiviMate:
 https://raw.githubusercontent.com/Kevin2296/nuvio-epg-addon/epg-data/public/epg/fr.xml.gz
 ```
 
-Verander `fr` in `es`, `it`, `pt`, `at`, `ch`, `cz`, `sk`, `hu`, `ro`, `tr`, `se`, `no`, `dk`, `fi`, `ca`, `au`, `br`, `jp`, `kr`, `in` enzovoort. **Deze nieuwe URLs werken pas na de eerste succesvolle publicatie van de bijgewerkte code naar `main`.** Bekijk [quality.json](https://raw.githubusercontent.com/Kevin2296/nuvio-epg-addon/epg-data/public/quality.json) voor de werkelijke actieve regio's en de laatste programmatijd per regio. Een regio zonder bruikbare programmering verschijnt niet in het rapport.
+Verander `fr` in `es`, `it`, `pt`, `at`, `ch`, `cz`, `sk`, `hu`, `ro`, `tr`, `se`, `no`, `dk`, `fi`, `ca`, `au`, `br`, `jp`, `kr`, `in` enzovoort. De betreffende URL werkt zodra er voor dat land een actuele gids is gepubliceerd. Bekijk [quality.json](https://raw.githubusercontent.com/Kevin2296/nuvio-epg-addon/epg-data/public/quality.json) voor de werkelijke actieve regio's en de laatste programmatijd per regio. Een regio zonder bruikbare programmering verschijnt niet in het rapport.
 
 De gegenereerde gids bewaart `<desc>`, `<category>`, `<sub-title>` en bruikbare `<episode-num>`-informatie als de bron die heeft; wat ontbreekt wordt niet verzonnen. Nuvio's huidige XMLTV-parser ondersteunt deze velden al. Om meer dan de standaard periode te zien moet de instelling voor toekomstige gidsdagen in Nuvio voldoende hoog staan. De actuele werking op de Nokia Streaming Box moet nog worden getest.
 
 Voor automatisch naamkoppelen publiceert de Nederlandse gids `SBS` als alternatieve `display-name` bij `SBS 6` **uitsluitend wanneer dat binnen de Nederlandse bron ondubbelzinnig is**. `SBS6 HD`, `NL | SBS 6 FHD` en `SBS 6` worden al grotendeels door Nuvio's naamnormalisatie opgevangen. Andere onduidelijke afkortingen worden niet stilzwijgend gekoppeld: kies bij twijfel handmatig **Change EPG**. Een algemeen fouttolerant scoringsmodel zou daarnaast een eigen wijziging in Nuvio vereisen.
 
 Om de Nokia niet te overbelasten blijft de standaardgids op de oorspronkelijke zes regio's. Voeg alleen de extra regiobestanden toe die je gebruikt. Ook eventuele volwassenenzenders hebben alleen een gids waar de upstreambron voldoende gegevens voor heeft; er is geen afzonderlijke garantie voor XXX.
+
+## Optioneel: gidsbronnen lokaal combineren (v1.2)
+
+De publieke addon blijft volledig werken **zonder eigen server**. Wil je extra gidsen voor ontbrekende uitzendingen, dan kun je de generator **privé** op TrueNAS of een computer uitvoeren met een extra lokaal XMLTV-bestand. Dat bestand wordt nooit naar de GitHub Actions-workflow verstuurd.
+
+```sh
+python3 -m unittest -v test_addon test_fusion
+python3 addon.py --output private-public --supplement NL=/private/extra-nl.xml.gz
+```
+
+De aanvullende bron moet een XMLTV- of XMLTV.gz-bestand zijn waar je rechtmatig toegang toe hebt. Je kunt meerdere `--supplement LAND=BESTAND`-argumenten opgeven, **ook voor hetzelfde land**. Ze worden in opgegeven volgorde verwerkt. Gebruik de provider-EPG in Nuvio rechtstreeks als je al een Xtream-account hebt.
+
+**Fusie is bewust voorzichtig:** dezelfde XMLTV-`id` én een overeenkomende zendernaam zijn vereist. Het bestaande programma wint bij tegenstrijdige titels of overlappende tijden. Bij een gelijke uitzending kan een ontbrekende beschrijving, genre, ondertitel of aflevering worden aangevuld. Een aanvullend programma mag alleen een werkelijk leeg tijdslot vullen. Het rapport `quality.json` bevat tellingen onder `supplemental_merges`.
+
+Dit is geen automatische publieke TVgids.nl-, Ziggo- of KPN-scraper; openbare zichtbaarheid is niet automatisch toestemming voor herpublicatie. Ook worden onjuiste `tvg-id`-koppelingen niet door fuzzy gokken rechtgetrokken: die logica hoort bij de privéplaylist in Nuvio, met controle van land en bron.
+
+De generator verwerkt bronregio's stapsgewijs en schrijft XMLTV in gedeelten naar gzip. Hierdoor hoeft hij niet alle bronbestanden of een volledige XMLTV-uitvoer tegelijk in het geheugen te houden. De Android-app ontvangt precies hetzelfde XMLTV-formaat als voorheen.
 
 ## Compatibiliteit
 

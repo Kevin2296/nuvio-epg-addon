@@ -5,7 +5,7 @@ No server, provider credentials, playlist parsing, or third-party dependencies.
 from __future__ import annotations
 
 import argparse
-from collections import defaultdict
+from collections import defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 import gzip
@@ -19,6 +19,7 @@ import sys
 import urllib.request
 import xml.etree.ElementTree as ET
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from epg_fusion import combine_channels
 
 UTC = timezone.utc
 PAGE_SIZE = 100
@@ -306,7 +307,45 @@ def xmltv(channels, region=None):
     return gzip.compress(ET.tostring(root, encoding='utf-8', xml_declaration=True), mtime=0)
 
 
-def build(output: Path, feeds: dict, now: datetime, base=BASE, source_status=None):
+def write_xmltv(path: Path, channels: dict, region=None) -> None:
+    """Write gzipped XMLTV incrementally: no giant ElementTree per global guide."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    import gzip as _gzip
+    with _gzip.GzipFile(filename=str(path), mode='wb', mtime=0) as out:
+        out.write(b'<?xml version="1.0" encoding="utf-8"?>\n')
+        out.write(b'<tv generator-info-name="Nuvio EPG Addon">')
+        sbs = [(cid, item) for cid, item in channels.items()
+               if (item.get('region', region) == 'NL' and
+                   ''.join(c for c in item['name'].casefold() if c.isalnum()).startswith('sbs'))]
+        sbs6 = [cid for cid, item in sbs
+                if ''.join(c for c in item['name'].casefold() if c.isalnum()) == 'sbs6']
+        safe_sbs = set(sbs6) if len(sbs) == len(sbs6) == 1 else set()
+        for cid, item in channels.items():
+            ch = ET.Element('channel', {'id': cid})
+            ET.SubElement(ch, 'display-name').text = item['name']
+            if cid in safe_sbs:
+                ET.SubElement(ch, 'display-name').text = 'SBS'
+            out.write(ET.tostring(ch, encoding='utf-8'))
+        for cid, item in channels.items():
+            for program in item['programmes']:
+                start, stop, title = program[:3]
+                desc, category, subtitle, episode = (list(program[3:]) + ['', '', '', ''])[:4]
+                p = ET.Element('programme', {
+                    'channel': cid, 'start': start.strftime('%Y%m%d%H%M%S +0000'),
+                    'stop': stop.strftime('%Y%m%d%H%M%S +0000')})
+                ET.SubElement(p, 'title').text = title
+                for tag, value in (('sub-title', subtitle), ('desc', desc),
+                                   ('category', category)):
+                    if value:
+                        ET.SubElement(p, tag).text = value
+                if episode:
+                    ET.SubElement(p, 'episode-num', {'system': 'onscreen'}).text = episode
+                out.write(ET.tostring(p, encoding='utf-8'))
+        out.write(b'</tv>')
+
+
+def build(output: Path, feeds, now: datetime, base=BASE, source_status=None, supplements=None):
     """Write a complete generation into a NEW directory. Caller publishes only on success."""
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
@@ -320,11 +359,38 @@ def build(output: Path, feeds: dict, now: datetime, base=BASE, source_status=Non
     duplicate_ids = 0
     report = {'generated_at': iso(now), 'window_hours': WINDOW_DAYS * 24,
               'window_days': WINDOW_DAYS, 'regions': {},
-              'guide_only': True, 'source_status': source_status or {}}
-    for region in REGIONS:
-        if region not in feeds:
+              'guide_only': True, 'source_status': source_status if source_status is not None else {},
+              'supplemental_merges': {}}
+    # Iterators allow downloads to be consumed and released one country at a time.
+    # Keep dict support for existing tests and external integrations.
+    feed_items = ((region, feeds[region]) for region in REGIONS if region in feeds) if isinstance(feeds, dict) else iter(feeds)
+    for region, raw in feed_items:
+        if region not in REGIONS:
             continue
-        channels, counts = parse(feeds[region], now)
+        channels, counts = parse(raw, now)
+        if supplements and region in supplements:
+            raw_supplements = supplements[region]
+            if isinstance(raw_supplements, bytes):
+                raw_supplements = [raw_supplements]  # backward compatible
+            merged_stats = {'sources_applied': 0, 'channels_added': 0, 'channels_merged': 0,
+                            'channels_rejected_name_conflict': 0, 'programmes_added': 0,
+                            'metadata_enriched': 0, 'overlap_conflicts': 0}
+            for secondary_raw in raw_supplements:
+                supplemental, _ = parse(secondary_raw, now)
+                channels, fusion = combine_channels(channels, supplemental)
+                merged_stats['sources_applied'] += 1
+                for stat, value in fusion.items():
+                    merged_stats[stat] += value
+            report['supplemental_merges'][region] = merged_stats
+            counts['channels_with_schedule'] = len(channels)
+            counts['channels_on_air_now'] = sum(
+                any(p[0] <= now < p[1] for p in ch['programmes']) for ch in channels.values())
+            counts['channels_without_current_programme'] = (
+                counts['channels_with_schedule'] - counts['channels_on_air_now'])
+            counts['channels_with_descriptions'] = sum(
+                any(p[3] for p in ch['programmes']) for ch in channels.values())
+            counts['latest_programme_end'] = iso(max(
+                p[1] for ch in channels.values() for p in ch['programmes']))
         for source_id, item in channels.items():
             if region in CATALOG_REGIONS:
                 if source_id not in combined:
@@ -334,7 +400,7 @@ def build(output: Path, feeds: dict, now: datetime, base=BASE, source_status=Non
         report['regions'][region] = counts
         slug = region.lower()
         (output / 'epg').mkdir(exist_ok=True)
-        (output / 'epg' / f'{slug}.xml.gz').write_bytes(xmltv(channels, region))
+        write_xmltv(output / 'epg' / f'{slug}.xml.gz', channels, region)
         # Extended international XMLTV coverage without enormous addon catalogues.
         if region not in CATALOG_REGIONS:
             continue
@@ -384,7 +450,7 @@ def build(output: Path, feeds: dict, now: datetime, base=BASE, source_status=Non
                     write_json(output, f'catalog/tv/{slug}/{extra}.json', result)
     if not catalogs:
         raise ValueError('no healthy regions')
-    (output / 'epg' / 'all.xml.gz').write_bytes(xmltv(combined))
+    write_xmltv(output / 'epg' / 'all.xml.gz', combined)
     report['combined_channels'] = len(combined)
     report['international_regions_available'] = len(report['regions'])
     report['extended_xmltv_only'] = sorted(set(report['regions']) - CATALOG_REGIONS)
@@ -404,7 +470,7 @@ def build(output: Path, feeds: dict, now: datetime, base=BASE, source_status=Non
     return report
 
 
-def generate(output: Path, now=None):
+def generate(output: Path, now=None, supplements=None):
     now = now or datetime.now(UTC)
     feeds, status = {}, {}
     def load_region(pair):
@@ -423,24 +489,51 @@ def generate(output: Path, now=None):
             except Exception:
                 return region, None, ('no-current-programmes' if no_schedule else 'unavailable')
 
-    # Independent countries can download concurrently. Parsing/building remains
-    # sequential to limit peak memory and avoid loading all XML trees at once.
-    with ThreadPoolExecutor(max_workers=6) as pool:
-        for region, raw, state in pool.map(load_region, REGIONS.items()):
-            status[region] = state
-            if raw is not None:
-                feeds[region] = raw
-            print(region + ': ' + state, flush=True)
-    # All-source failure leaves the existing published branch untouched.
-    return build(output, feeds, now, source_status=status)
+    # Executor.map() submits all jobs eagerly on Python 3.11, potentially
+    # retaining 52 large compressed results in memory. Maintain at most four
+    # outstanding downloads, consumed in original country order.
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        pending = deque()
+        items = iter(REGIONS.items())
+        def queue_one():
+            try:
+                item = next(items)
+            except StopIteration:
+                return
+            pending.append(pool.submit(load_region, item))
+        for _ in range(4):
+            queue_one()
+        def available_feeds():
+            while pending:
+                region, raw, state = pending.popleft().result()
+                queue_one()
+                status[region] = state
+                print(region + ': ' + state, flush=True)
+                if raw is not None:
+                    yield region, raw
+        # All-source failure leaves the existing published branch untouched.
+        return build(output, available_feeds(), now, source_status=status,
+                     supplements=supplements)
 
 
 def main():
     parser = argparse.ArgumentParser(description='Generate public EPG addon JSON and XMLTV')
     parser.add_argument('--output', type=Path, default=Path('public'))
+    parser.add_argument('--supplement', action='append', default=[], metavar='REGION=FILE',
+                        help='Local secondary XMLTV file; repeat for multiple feeds, never URLs')
     args = parser.parse_args()
     try:
-        report = generate(args.output)
+        supplements = {}
+        for spec in args.supplement:
+            region, sep, filename = spec.partition('=')
+            region = region.upper()
+            if not sep or region not in REGIONS or not filename:
+                raise ValueError('supplement must be REGION=FILE for a known region')
+            path = Path(filename)
+            if not path.is_file() or path.stat().st_size > MAX_COMPRESSED:
+                raise ValueError('supplement file missing or too large')
+            supplements.setdefault(region, []).append(path.read_bytes())
+        report = generate(args.output, supplements=supplements)
         print('Generated ' + str(sum(r['channels_with_schedule'] for r in report['regions'].values())) + ' guide channels')
     except Exception:
         print('Generation failed; previous published snapshot must be retained', file=sys.stderr)
