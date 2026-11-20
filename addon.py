@@ -5,7 +5,7 @@ No server, provider credentials, playlist parsing, or third-party dependencies.
 from __future__ import annotations
 
 import argparse
-from collections import defaultdict
+from collections import defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 import gzip
@@ -471,11 +471,24 @@ def generate(output: Path, now=None, supplements=None):
             except Exception:
                 return region, None, ('no-current-programmes' if no_schedule else 'unavailable')
 
-    # Bounded parallel downloads. Yield each result to the generator in region
-    # order, rather than retaining all 52 compressed feeds in memory.
+    # Executor.map() submits all jobs eagerly on Python 3.11, potentially
+    # retaining 52 large compressed results in memory. Maintain at most four
+    # outstanding downloads, consumed in original country order.
     with ThreadPoolExecutor(max_workers=4) as pool:
+        pending = deque()
+        items = iter(REGIONS.items())
+        def queue_one():
+            try:
+                item = next(items)
+            except StopIteration:
+                return
+            pending.append(pool.submit(load_region, item))
+        for _ in range(4):
+            queue_one()
         def available_feeds():
-            for region, raw, state in pool.map(load_region, REGIONS.items()):
+            while pending:
+                region, raw, state = pending.popleft().result()
+                queue_one()
                 status[region] = state
                 print(region + ': ' + state, flush=True)
                 if raw is not None:
