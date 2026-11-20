@@ -48,6 +48,17 @@ class FusionTests(unittest.TestCase):
         self.assertEqual(stats['programmes_added'], 1)
         self.assertEqual(stats['metadata_enriched'], 1)
 
+    def test_enrichment_keeps_existing_genre_and_adds_missing_episode(self):
+        original = (p(0)[0], p(0)[1], 'Journaal', 'Short', 'News', '', '')
+        extra = (p(0)[0], p(0)[1], 'Journaal', 'A more detailed description',
+                 'Entertainment', 'Daily update', 'S2 E3')
+        shows, stats = combine_programmes([original], [extra])
+        self.assertEqual(shows[0][3], 'A more detailed description')
+        self.assertEqual(shows[0][4], 'News')
+        self.assertEqual(shows[0][5], 'Daily update')
+        self.assertEqual(shows[0][6], 'S2 E3')
+        self.assertEqual(stats['metadata_enriched'], 1)
+
     def test_conflicting_title_or_schedule_is_never_overridden(self):
         shows, stats = combine_programmes([p(0, 'Nieuws')], [
             p(0, 'Sport', 'Different show'), p(0, 'Nieuws', duration=2)])
