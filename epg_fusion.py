@@ -42,8 +42,21 @@ def combine_programmes(primary: list, secondary: list) -> tuple[list, dict]:
             if len(clashes) == 1:
                 i, existing = clashes[0]
                 if existing[0] == start and existing[1] == end and normalized(existing[2]) == normalized(title):
-                    if details_score(candidate) > details_score(existing):
-                        accepted[i] = candidate
+                    # Enrich individual fields while keeping primary title, time
+                    # and already-present values. Never replace a known genre with
+                    # a different source's unrelated guess.
+                    current = list(existing) + [''] * max(0, 7 - len(existing))
+                    incoming = list(candidate) + [''] * max(0, 7 - len(candidate))
+                    changed = False
+                    for index in range(3, 7):
+                        if incoming[index] and (
+                            not current[index] or
+                            (index == 3 and len(incoming[index]) > len(current[index]))
+                        ):
+                            current[index] = incoming[index]
+                            changed = True
+                    if changed:
+                        accepted[i] = tuple(current)
                         enriched += 1
                     continue
             conflicts += 1
