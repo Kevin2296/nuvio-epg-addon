@@ -92,6 +92,21 @@ class FusionTests(unittest.TestCase):
             self.assertEqual(report['supplemental_merges']['NL']['programmes_added'], 1)
             self.assertEqual(report['supplemental_merges']['NL']['metadata_enriched'], 1)
 
+    def test_multiple_private_supplements_fill_gaps_in_order(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / 'published'
+            primary = feed([p(0)])
+            supplement1 = feed([p(1)])
+            supplement2 = feed([p(2)])
+            report = addon.build(out, {'NL': primary}, NOW,
+                                 supplements={'NL': [supplement1, supplement2]})
+            root = ET.fromstring(gzip.decompress((out / 'epg/nl.xml.gz').read_bytes()))
+            self.assertEqual(len(root.findall('programme')), 3)
+            self.assertEqual(report['supplemental_merges']['NL']['sources_applied'], 2)
+            self.assertEqual(report['supplemental_merges']['NL']['programmes_added'], 2)
+            self.assertEqual(report['regions']['NL']['channels_with_schedule'], 1)
+            self.assertEqual(report['regions']['NL']['channels_on_air_now'], 1)
+
     def test_single_pass_feed_iterator_and_streaming_gzip_xml(self):
         with tempfile.TemporaryDirectory() as tmp:
             result = addon.build(Path(tmp) / 'published',
