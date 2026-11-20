@@ -369,10 +369,28 @@ def build(output: Path, feeds, now: datetime, base=BASE, source_status=None, sup
             continue
         channels, counts = parse(raw, now)
         if supplements and region in supplements:
-            supplemental, supplement_counts = parse(supplements[region], now)
-            channels, fusion = combine_channels(channels, supplemental)
-            report['supplemental_merges'][region] = {**fusion,
-                'supplement_channels_with_schedule': supplement_counts['channels_with_schedule']}
+            raw_supplements = supplements[region]
+            if isinstance(raw_supplements, bytes):
+                raw_supplements = [raw_supplements]  # backward compatible
+            merged_stats = {'sources_applied': 0, 'channels_added': 0, 'channels_merged': 0,
+                            'channels_rejected_name_conflict': 0, 'programmes_added': 0,
+                            'metadata_enriched': 0, 'overlap_conflicts': 0}
+            for secondary_raw in raw_supplements:
+                supplemental, _ = parse(secondary_raw, now)
+                channels, fusion = combine_channels(channels, supplemental)
+                merged_stats['sources_applied'] += 1
+                for stat, value in fusion.items():
+                    merged_stats[stat] += value
+            report['supplemental_merges'][region] = merged_stats
+            counts['channels_with_schedule'] = len(channels)
+            counts['channels_on_air_now'] = sum(
+                any(p[0] <= now < p[1] for p in ch['programmes']) for ch in channels.values())
+            counts['channels_without_current_programme'] = (
+                counts['channels_with_schedule'] - counts['channels_on_air_now'])
+            counts['channels_with_descriptions'] = sum(
+                any(p[3] for p in ch['programmes']) for ch in channels.values())
+            counts['latest_programme_end'] = iso(max(
+                p[1] for ch in channels.values() for p in ch['programmes']))
         for source_id, item in channels.items():
             if region in CATALOG_REGIONS:
                 if source_id not in combined:
@@ -502,7 +520,7 @@ def main():
     parser = argparse.ArgumentParser(description='Generate public EPG addon JSON and XMLTV')
     parser.add_argument('--output', type=Path, default=Path('public'))
     parser.add_argument('--supplement', action='append', default=[], metavar='REGION=FILE',
-                        help='Local secondary XMLTV file (personal builds only; no network URL)')
+                        help='Local secondary XMLTV file; repeat for multiple feeds, never URLs')
     args = parser.parse_args()
     try:
         supplements = {}
@@ -514,7 +532,7 @@ def main():
             path = Path(filename)
             if not path.is_file() or path.stat().st_size > MAX_COMPRESSED:
                 raise ValueError('supplement file missing or too large')
-            supplements[region] = path.read_bytes()
+            supplements.setdefault(region, []).append(path.read_bytes())
         report = generate(args.output, supplements=supplements)
         print('Generated ' + str(sum(r['channels_with_schedule'] for r in report['regions'].values())) + ' guide channels')
     except Exception:
