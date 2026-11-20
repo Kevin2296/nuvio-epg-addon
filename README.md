@@ -51,7 +51,7 @@ python3 -m unittest -v test_addon test_fusion
 python3 addon.py --output private-public --supplement NL=/private/extra-nl.xml.gz
 ```
 
-De aanvullende bron moet een XMLTV- of XMLTV.gz-bestand zijn waar je rechtmatig toegang toe hebt. Je kunt meerdere `--supplement LAND=BESTAND`-argumenten opgeven, maar slechts één per land; gebruik de provider-EPG in Nuvio rechtstreeks als je al een Xtream-account hebt.
+De aanvullende bron moet een XMLTV- of XMLTV.gz-bestand zijn waar je rechtmatig toegang toe hebt. Je kunt meerdere `--supplement LAND=BESTAND`-argumenten opgeven, **ook voor hetzelfde land**. Ze worden in opgegeven volgorde verwerkt. Gebruik de provider-EPG in Nuvio rechtstreeks als je al een Xtream-account hebt.
 
 **Fusie is bewust voorzichtig:** dezelfde XMLTV-`id` én een overeenkomende zendernaam zijn vereist. Het bestaande programma wint bij tegenstrijdige titels of overlappende tijden. Bij een gelijke uitzending kan een ontbrekende beschrijving, genre, ondertitel of aflevering worden aangevuld. Een aanvullend programma mag alleen een werkelijk leeg tijdslot vullen. Het rapport `quality.json` bevat tellingen onder `supplemental_merges`.
 
