@@ -32,4 +32,13 @@ Het [Onet-zenderbestand](https://github.com/iptv-org/epg/blob/master/sites/progr
 
 De eerste bron heeft voorrang voor zender-ID's, titels en tijden. Bronnen verderop voegen zenders toe, vullen gaten en vullen beschrijvingen en andere gegevens aan. Verschillende ID's worden alleen samengevoegd bij een unieke genormaliseerde zendernaam in beide feeds en minimaal twee verschillende programma's met gelijke begin- en eindtijd. Zenders die niet veilig aan elkaar gekoppeld kunnen worden, behouden elk hun eigen ID.
 
+Met een vertrouwd lokaal Extended M3U-bestand kun je de HTTPS-gidslinks uit `url-tvg` of `x-tvg-url` ophalen. Alleen de kopregel wordt gelezen. De links worden in volgorde toegepast en onbeschikbare links worden overgeslagen zolang minstens één gids uit de afspeellijst werkt.
+
+```sh
+python3 private_guide.py --region NL --output /private/epg/nl.xml.gz \
+  --source m3u=/private/provider.m3u --source regional --iptv-org-aliases
+```
+
+`--iptv-org-aliases` gebruikt [de iptv-org-zendercatalogus](https://github.com/iptv-org/api#channels) voor alternatieve namen die binnen het gekozen land eenduidig zijn. Voor NL telt `SBS` ook als kandidaat voor `SBS 6`. Een alias vereist nog steeds twee verschillende overeenkomende uitzendingen. Je afspeellijst wordt lokaal gelezen en alleen de gevonden gidslinks worden opgehaald.
+
 Na generatie toont de JSON-uitvoer per bron de status en het aantal toegevoegde programma's, verrijkte programma's en conflicten. `latest_programme_end` toont hoe ver de gids werkelijk vooruitloopt. Een onbeschikbare landpreset wordt overgeslagen. Als een opgegeven provider-URL of lokaal bestand faalt, blijft het vorige uitvoerbestand beschikbaar. De URL en de naam van de omgevingsvariabele verschijnen niet in het verslag.
