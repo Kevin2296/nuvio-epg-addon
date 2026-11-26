@@ -99,3 +99,7 @@ De uitvoermap moet nieuw of leeg zijn. Tests dekken protocolvelden, paginering, 
 Bronnen: [EPGShare01](https://epgshare01.online/epgshare01/). Beschikbaarheid, juistheid en rechten op externe gidsgegevens hangen af van de bron; de softwarelicentie verleent geen rechten op die data.
 
 Geen officiële Nuvio- of Stremio-uitgave. Broncode: GPL-3.0, zie [LICENSE](LICENSE). De native patch bouwt voort op [NuvioPlusIPTV](https://github.com/homelessbrian/NuvioPlusIPTV).
+
+## Privégids met meerdere bronnen
+
+Combineer op TrueNAS een eigen XMLTV-feed met regionale gidsen. Zie [Een privégids combineren voor Nuvio](PRIVATE_GUIDE.md) voor de beschikbare bronnen en voorbeelden.
